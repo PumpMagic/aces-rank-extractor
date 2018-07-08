@@ -2,9 +2,9 @@
 
 A tool for extracting ranking data from Mario Tennis Aces.
 
-Mario Tennis Aces is a lovely new game from Nintendo. It's got a nice competitive side, and it even has an  in-game 
-leaderboard. Unfortunately, that leaderboard is inaccessible outside of the game, and no history or statistics about it 
-are available. This project aims to fix that.
+Mario Tennis Aces is an excellent new game from Nintendo. It's got an in-game leaderboard that suits its competitive 
+nature. Unfortunately, that leaderboard is inaccessible outside of the game, and no history or statistics about it are 
+available. This project aims to fix that.
 
 Aces Rank Extractor extracts the Mario Tennis Aces ranking data at a single point in time. Its input is a video of the
 ranking table, as uploaded from a Nintendo Switch, and its output is (well, hopes to be) a collection of database-ready
@@ -38,6 +38,13 @@ And then to make that database accessible via some web UI.
     itself behind multiple authentication servers. I haven't got the time to extract the keys required from my Switch
     hardware and game cart to make that authentication happen. Even if I did, my account would probably get flagged
     pretty quickly for scraping. :)
+
+## TODO
+
+* Generate Tesseract training data for leaderboard fonts. Seems to be one for number columns and one for nickname 
+column
+    * The number column font is close to Nexa Black, but more vertically squished.
+* Speed up OCR by parallelizing, or just figuring out a lower bound on OCR FPS that leads to acceptable results
 
 ## Disclaimer
 

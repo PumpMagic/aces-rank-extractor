@@ -3,6 +3,9 @@ import pytesseract
 
 import subprocess
 import os
+import itertools
+from collections import Counter
+import time
 
 TEST_VIDEO_PATH = "/Users/owner/repos/aces-scraper/resources/acesranks-01.mp4"
 IDENTIFIER_STRIP_X = 37
@@ -123,19 +126,24 @@ def dump_marked_image(source_image, row_bounds_list, output_path):
 
 
 class LeaderboardRow():
-    def __init__(self, ranking, character, country, nickname, points, wins, losses, win_percent, rating):
+    def __init__(self, ranking, character, country, nickname, points, wins_losses, win_percent, rating):
         self.ranking = ranking
         self.character = character
         self.country = country
         self.nickname = nickname
         self.points = points
-        self.wins = wins
-        self.losses = losses
+        self.wins_losses = wins_losses
         self.win_percent = win_percent
         self.rating = rating
 
 
 def filter_extractable_bounds(raw_bounds_list):
+    """
+    Given a list of row bounds, filter out those from which we cannot realistically extract quality data.
+
+    :param raw_bounds_list:
+    :return:
+    """
     return [ raw_bounds for raw_bounds in raw_bounds_list if raw_bounds.y_end - raw_bounds.y_start >= 40 ]
 
 
@@ -143,6 +151,12 @@ def filter_extractable_bounds(raw_bounds_list):
 # imperfect rows, e.g. if one row has ranking 4 and nickname X and points unknown and another row has ranking 4 and
 # nickname unknown and points Y, could combine into ranking 4 and nickname X and points Y
 def ocr_row(image, row_bounds):
+    """
+
+    :param image:
+    :param row_bounds:
+    :return: None, or LeaderboardRow with all fields Noneable except for ranking.
+    """
     # Crop each cell out.
     RANKING_START_X = IDENTIFIER_STRIP_X
     RANKING_END_X = 161
@@ -157,20 +171,72 @@ def ocr_row(image, row_bounds):
     RATING_START_X = 1024
     RATING_END_X = 1218
 
-    ranking_image = image.crop((RANKING_START_X, row_bounds.y_start, RANKING_END_X, row_bounds.y_end))
+    # convert the image to black and white before passing to tesseract - seems to help OCR
+    image_bw = image.convert("L")
 
-    ranking_image.copy().convert("L").save("/tmp/poop.png")
+    # debug
+    image_bw.copy().save("/tmp/poop.png")
 
-    raw_ranking = pytesseract.image_to_string(ranking_image.convert("L"),
+    ranking_image = image_bw.crop((RANKING_START_X, row_bounds.y_start, RANKING_END_X, row_bounds.y_end))
+    nickname_image = image_bw.crop((NICKNAME_START_X, row_bounds.y_start, NICKNAME_END_X, row_bounds.y_end))
+    points_image = image_bw.crop((POINTS_START_X, row_bounds.y_start, POINTS_END_X, row_bounds.y_end))
+    wins_losses_image = image_bw.crop((WINS_LOSSES_START_X, row_bounds.y_start, WINS_LOSSES_END_X, row_bounds.y_end))
+    win_percent_image = image_bw.crop((WIN_PERCENT_START_X, row_bounds.y_start, WIN_PERCENT_END_X, row_bounds.y_end))
+    rating_image = image_bw.crop((RATING_START_X, row_bounds.y_start, RATING_END_X, row_bounds.y_end))
+
+    # PSM 7 means "treat the image as a single text line"
+
+    raw_ranking = pytesseract.image_to_string(ranking_image,
                                               config="--psm 7 -c tessedit_char_whitelist=0123456789",
                                               lang="eng")
 
-    if raw_ranking.strip() == "":
-        print("Wow")
+    # God help us with the nickname. Is there any pattern to the language / character set?
+    raw_nickname = pytesseract.image_to_string(nickname_image,
+                                               config="--psm 7",
+                                               lang="eng")
 
-    stubbed = LeaderboardRow(raw_ranking, "", "", "", "", "", "", "", "")
+    raw_points = pytesseract.image_to_string(points_image,
+                                             config="--psm 7 -c tessedit_char_whitelist=0123456789,",
+                                             lang="eng")
 
-    return stubbed
+    raw_wins_losses = pytesseract.image_to_string(wins_losses_image,
+                                                  config="--psm 7 -c tessedit_char_whitelist=0123456789-",
+                                                  lang="eng")
+
+    raw_win_percent = pytesseract.image_to_string(win_percent_image,
+                                                  config="--psm 7 -c tessedit_char_whitelist=0123456789%",
+                                                  lang="eng")
+
+    raw_rating = pytesseract.image_to_string(rating_image,
+                                             config="--psm 7 -c tessedit_char_whitelist=0123456789",
+                                             lang="eng")
+
+    # TODO: Identify country and nickname using a custom image classifier
+
+    # Do basic text cleanup and throw away clearly wrong data
+    ranking = raw_ranking.strip()
+    if len(ranking) < 1:
+        ranking = None
+        # No key! Useless row, at least for now.
+        return None
+
+    nickname = raw_nickname
+    points = raw_points.strip()
+    if points.startswith(",") or points.endswith(","):
+        points = None
+    # TODO: Do we want to separate wins from losses here? Or later?
+    # Doing it here would be easier
+    wins_losses = raw_wins_losses.strip()
+    if wins_losses.startswith("-") or wins_losses.endswith("-"):
+        wins_losses = None
+    win_percent = raw_win_percent.strip()
+    if not win_percent.endswith("%") or win_percent.count("%") != 1:
+        win_percent = None
+    rating = raw_rating.strip()
+
+    raw_row = LeaderboardRow(ranking, None, None, nickname, points, wins_losses, win_percent, rating)
+
+    return raw_row
 
 
 def extract_leaderboard_rows_from_image(image):
@@ -181,29 +247,66 @@ def extract_leaderboard_rows_from_image(image):
     return leaderboard_rows
 
 
-def extract_all_leaderboard_rows_from_frames(video_frame_images):
-    all_raw_rows = list()
+def reach_leaderboard_consensus(all_incomplete_leaderboard_rows):
+    # Group rows by ranking
+    # TODO: Need to convert ranking strs to ints for this to be useful?
+    sorted_incomplete_leaderboard_rows = sorted(all_incomplete_leaderboard_rows, key=lambda r: r.ranking)
+    incomplete_row_groups = itertools.groupby(sorted_incomplete_leaderboard_rows, key=lambda r: r.ranking)
 
+    for ranking, incomplete_row_group_iterable in incomplete_row_groups:
+        incomplete_row_group = list(incomplete_row_group_iterable)
+        nicknames = [ r.nickname for r in incomplete_row_group if r.nickname is not None ]
+        points = [ r.points for r in incomplete_row_group if r.points is not None ]
+        wins_losses = [ r.wins_losses for r in incomplete_row_group if r.wins_losses is not None ]
+        win_percents = [ r.win_percent for r in incomplete_row_group if r.win_percent is not None ]
+        ratings = [ r.rating for r in incomplete_row_group if r.rating is not None ]
+
+        if len(nicknames) < 1 or len(points) < 1 or len(wins_losses) < 1 or len(win_percents) < 1 or len(ratings) < 1:
+            # Not one instance of a row contained a certain column
+            print("Unable to extract something for ranking {}".format(ranking))
+            # TODO: Throw an error?
+            continue
+
+        nickname_of_choice = max(Counter(nicknames).items(), key=lambda tup: tup[1])[0]
+        print("seeya")
+
+
+def extract_all_incomplete_leaderboard_rows_from_frames(video_frame_images):
+    num_frames_extracted_from = 0
+    all_incomplete_rows_from_all_frames = list()
     for video_frame_image in video_frame_images:
-        all_raw_rows.append(extract_leaderboard_rows_from_image(video_frame_image))
+        # TODO: This is really slow. Consider parallelizing it. Would be really easy with subprocess module.
+        all_incomplete_rows_from_all_frames.extend(extract_leaderboard_rows_from_image(video_frame_image))
+        num_frames_extracted_from += 1
+        if num_frames_extracted_from % 5 == 0:
+            print("Extracted from {} frames...".format(num_frames_extracted_from))
+            break
 
-    return all_raw_rows
+    # TODO: Implement a consensus algorithm that uses the incomplete rows to make
+    # Just group the incomplete rows by rank, then take the most common of each present (non-None) value
+
+    return all_incomplete_rows_from_all_frames
 
 
 def extract_frames(video_path, temp_dir):
     """
+    Extract all frames from a given video into individual image files, writing them to a temporary directory.
 
-    :param video_path:
-    :return: list of frame paths
+    :param video_path: Location of video in filesystem.
+    :return: List of paths to extracted frames.
     """
-    # TODO: Use a wrapper maybe
+    # TODO: Consider using an ffmpeg wrapper. Might be cleaner, and would make dep on ffmpeg more explicit.
     ffmpeg_output_dir = os.path.join(temp_dir, os.path.basename(video_path))
-    ffmpeg_output_pattern = os.path.join(ffmpeg_output_dir, "out%04d.png")
+    ffmpeg_output_pattern = os.path.join(ffmpeg_output_dir, "out%06d.png")
     os.makedirs(ffmpeg_output_dir, exist_ok=True)
+
+    # Run ffmpeg
     # subprocess.check_call(["ffmpeg", "-i", video_path, ffmpeg_output_path])
     # TODO: -ss here is a hack to ignore non-leaderboard frames
     subprocess.check_call(["ffmpeg", "-i", video_path, "-ss", "00:00:09", ffmpeg_output_pattern])
 
+    # TODO: This could be problematic if some files existed in the output directory already; it would return those
+    # files as well. Consider adding a random string to the output path.
     filenames = os.listdir(ffmpeg_output_dir)
     frame_paths = [ os.path.join(ffmpeg_output_dir, filename) for filename in filenames ]
 
@@ -212,12 +315,18 @@ def extract_frames(video_path, temp_dir):
 
 def extract_leaderboard_data_from_video(video_path):
     video_frame_paths = extract_frames(video_path, "/tmp/frames")
-    video_frames = [ Image.open(video_frame_path) for video_frame_path in video_frame_paths ]
-    # TODO: Filter out non-leaderboard frames, or make sure that the video does not have any
-    all_leaderboard_rows = extract_all_leaderboard_rows_from_frames(video_frames)
-    leaderboard_rows = reach_leaderboard_consensus(raw_leaderboard_rows)
 
-    return leaderboard_rows
+    # Load the extracted frames into Pillow images
+    # We could use an iterator here if we wanted to save memory... probably doesn't matter since our input videos are
+    # thirty seconds long
+    video_frames = [ Image.open(video_frame_path) for video_frame_path in video_frame_paths ]
+
+    # TODO: Filter out non-leaderboard frames, or make sure that the video does not have any
+    all_incomplete_leaderboard_rows = extract_all_incomplete_leaderboard_rows_from_frames(video_frames)
+
+    high_confidence_leaderboard_rows = reach_leaderboard_consensus(all_incomplete_leaderboard_rows)
+
+    return high_confidence_leaderboard_rows
 
 
 if __name__ == '__main__':
